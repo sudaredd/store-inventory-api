@@ -1,12 +1,51 @@
 from flask import Flask, jsonify, request
-from database import get_db_connection
-import google.generativeai as genai
+from database import get_db_connection, get_all_inventory_text
+from google import genai
 import os
+import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# Configure Gemini
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Initialize the modern Client
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+def call_gemini_with_fallback(prompt):
+    try:
+        # Primary model
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        error_str = str(e)
+        # Check for 429 (Resource Exhausted) or 404 (Not Found)
+        if "429" in error_str or "404" in error_str:
+            print(f"Primary model failed (1.5-flash). Error: {error_str[:50]}... Retrying with fallback (gemini-2.5-flash-lite) in 1s...")
+            time.sleep(1) # Wait for network/quota to settle
+            try:
+                # User requested fallback
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=prompt
+                )
+                return response.text.strip()
+            except Exception as fallback_error:
+                print(f"Fallback (2.5-flash-lite) failed: {str(fallback_error)[:50]}... Retrying with safety net (gemini-flash-latest)...")
+                # Ultimate fallback (Safety Net)
+                try:
+                    response = client.models.generate_content(
+                        model="gemini-flash-latest",
+                        contents=prompt
+                    )
+                    return response.text.strip()
+                except Exception as final_error:
+                    raise Exception(f"All models failed. Final error: {str(final_error)}")
+        else:
+            raise e
 
 @app.route('/products', methods=['GET'])
 def get_products():
@@ -58,15 +97,32 @@ def describe_product(id):
         return jsonify({"error": "Product not found"}), 404
 
     try:
-        model = genai.GenerativeModel("gemini-flash-latest")
         PROMPT = (
             f"You are an elite e-commerce copywriter for a luxury brand like Apple or Leica. "
             f"Your tone is minimal, sophisticated, and expensive. "
             f"Never use emojis, never use exclamation marks, and keep descriptions under 20 words. "
             f"Write a description for a product named '{product['name']}'."
         )
-        response = model.generate_content(PROMPT)
-        return jsonify({"description": response.text.strip()})
+        description = call_gemini_with_fallback(PROMPT)
+        return jsonify({"description": description})
+    except Exception as e:
+        return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+@app.route('/inventory-chat', methods=['GET'])
+def inventory_chat():
+    question = request.args.get('q', '')
+    if not question:
+        return jsonify({"error": "Missing query parameter 'q'"}), 400
+
+    inventory_text = get_all_inventory_text()
+    
+    try:
+        PROMPT = (
+            f"You are a store manager. Based on this inventory list: [{inventory_text}], "
+            f"answer the user's question: [{question}]."
+        )
+        answer = call_gemini_with_fallback(PROMPT)
+        return jsonify({"answer": answer})
     except Exception as e:
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
 

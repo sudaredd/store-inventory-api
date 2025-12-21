@@ -16,3 +16,13 @@ def create_tables():
     ''')
     conn.commit()
     conn.close()
+
+def get_all_inventory_text():
+    conn = get_db_connection()
+    products = conn.execute('SELECT * FROM products').fetchall()
+    conn.close()
+    
+    inventory_text = ", ".join(
+        [f"Product {p['id']}: {p['name']} (${p['price']})" for p in products]
+    )
+    return inventory_text

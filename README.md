@@ -5,29 +5,25 @@ A Flask-based API for managing store inventory, powered by SQLite and Google Gem
 ## Features
 - **Persistent Storage**: Uses SQLite (`inventory.db`) to store products.
 - **AI Descriptions**: Generates high-end marketing copy for products using Google Gemini AI.
+- **Inventory Chat**: Ask questions about your entire stock context.
+- **Smart Fallback**: Reliable AI generation that automatically handles rate limits (429) and missing models (404) by retrying with alternative models (`gemini-1.5-flash` → `gemini-2.5-flash-lite` → `models/gemini-flash-latest`), with a 1-second delay for stability.
 - **RESTful Endpoints**: Standard GET/POST endpoints for management.
 
 ## Setup
 
 ### 1. Install Dependencies
+The project uses the modern `google-genai` SDK.
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 2. Configure API Key
-You need a Google Gemini API key to use the AI features. [Get your API key here](https://aistudio.google.com/api-keys).
-
-Set it as an environment variable:
-
-**PowerShell (Windows):**
-```powershell
-$env:GEMINI_API_KEY = "your_api_key_here"
-```
-
-**Bash (Linux/Mac/Git Bash):**
-```bash
-export GEMINI_API_KEY="your_api_key_here"
-```
+1.  Copy `.env.example` to `.env`.
+2.  Add your Google Gemini API key to `.env`:
+    ```ini
+    GEMINI_API_KEY=your_key_here
+    ```
+    [Get your API key here](https://aistudio.google.com/api-keys).
 
 ### 3. Initialize Database
 Run the initialization script to create the database and seed it with sample data:
@@ -71,4 +67,13 @@ Generates a luxury marketing description for the product.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/describe/1
+```
+
+### 5. Inventory Chat
+**GET** `/inventory-chat?q=question`
+
+Ask questions about the current stock.
+
+```bash
+curl "http://127.0.0.1:8080/inventory-chat?q=What+is+the+cheapest+item"
 ```
