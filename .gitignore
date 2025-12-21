@@ -2,7 +2,5 @@ __pycache__/
 *.pyc
 inventory.db
 .env
-error.log
-models.txt
-models_error.txt
+
 .pytest_cache/
