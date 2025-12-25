@@ -1,9 +1,11 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 from database import get_db_connection, get_all_inventory_text
 from google import genai
+from google.genai import types
 import os
 import time
 from dotenv import load_dotenv
+import tools 
 
 load_dotenv()
 
@@ -12,40 +14,68 @@ app = Flask(__name__)
 # Initialize the modern Client
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-def call_gemini_with_fallback(prompt):
-    try:
-        # Primary model
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
+# Create a tool dictionary for easy lookup
+available_tools = {
+    'update_product_price': tools.update_product_price,
+    'delete_product': tools.delete_product
+}
+
+def generate_response_safe(prompt, model="gemini-2.5-flash", tools_list=None, response_schema=None, response_mime_type=None):
+    """
+    Generates content with robust 429 handling. Returns full response object.
+    Supports optional tools list and structured output schema.
+    """
+    import re
+    max_retries = 3
+    base_delay = 5
+    
+    config = None
+    if tools_list or response_schema or response_mime_type:
+        config = types.GenerateContentConfig(
+            tools=tools_list,
+            response_schema=response_schema,
+            response_mime_type=response_mime_type
         )
-        return response.text.strip()
-    except Exception as e:
-        error_str = str(e)
-        # Check for 429 (Resource Exhausted) or 404 (Not Found)
-        if "429" in error_str or "404" in error_str:
-            print(f"Primary model failed (1.5-flash). Error: {error_str[:50]}... Retrying with fallback (gemini-2.5-flash-lite) in 1s...")
-            time.sleep(1) # Wait for network/quota to settle
-            try:
-                # User requested fallback
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash-lite",
-                    contents=prompt
-                )
-                return response.text.strip()
-            except Exception as fallback_error:
-                print(f"Fallback (2.5-flash-lite) failed: {str(fallback_error)[:50]}... Retrying with safety net (gemini-flash-latest)...")
-                # Ultimate fallback (Safety Net)
-                try:
-                    response = client.models.generate_content(
-                        model="gemini-flash-latest",
-                        contents=prompt
-                    )
-                    return response.text.strip()
-                except Exception as final_error:
-                    raise Exception(f"All models failed. Final error: {str(final_error)}")
-        else:
-            raise e
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config
+            )
+            return response
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                if attempt < max_retries:
+                    wait_time = base_delay * (2 ** attempt)
+                    match_delay = re.search(r"retryDelay['\"]?:\s*['\"]?([\d\.]+)s", error_str)
+                    match_msg = re.search(r"retry in ([\d\.]+)s", error_str)
+                    
+                    if match_delay:
+                        wait_time = float(match_delay.group(1)) + 1.0
+                    elif match_msg:
+                        wait_time = float(match_msg.group(1)) + 1.0
+                        
+                    print(f"429 Hit. API asked to wait {wait_time}s. Sleeping...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    if model == "gemini-2.5-flash":
+                        print("Retry limit reached. Swapping to gemini-2.0-flash-exp for fallback...")
+                        return generate_response_safe(
+                            prompt, 
+                            model="gemini-2.0-flash-exp", 
+                            tools_list=tools_list,
+                            response_schema=response_schema,
+                            response_mime_type=response_mime_type
+                        )
+                    raise e
+            else:
+                raise e
+
+
 
 @app.route('/products', methods=['GET'])
 def get_products():
@@ -97,16 +127,57 @@ def describe_product(id):
         return jsonify({"error": "Product not found"}), 404
 
     try:
+        # Use simple generation for description (no tools needed)
         PROMPT = (
-            f"You are an elite e-commerce copywriter for a luxury brand like Apple or Leica. "
-            f"Your tone is minimal, sophisticated, and expensive. "
-            f"Never use emojis, never use exclamation marks, and keep descriptions under 20 words. "
-            f"Write a description for a product named '{product['name']}'."
+            f"You are an elite e-commerce copywriter. Write a description for: '{product['name']}'."
+            f"Strictly limit your response to maximum 30 words. Do not use Markdown formatting like bold or headers."
+            f"Keep it one single sophisticated sentence."
         )
-        description = call_gemini_with_fallback(PROMPT)
-        return jsonify({"description": description})
+        response = generate_response_safe(PROMPT)
+        return jsonify({"description": response.text.strip()})
     except Exception as e:
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+@app.route('/inventory-report', methods=['GET'])
+def inventory_report():
+    inventory_text = get_all_inventory_text()
+    
+    # Define the schema for the report
+    # Schema: Array<Object {name: str, price: float, is_luxury: bool}>
+    report_schema = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "name": {"type": "STRING"},
+                "price": {"type": "NUMBER"},
+                "is_luxury": {"type": "BOOLEAN"}
+            },
+            "required": ["name", "price", "is_luxury"]
+        }
+    }
+
+    try:
+        PROMPT = (
+            f"Analyze this inventory: {inventory_text}. "
+            f"Return a JSON array categorizing each item. "
+            f"Mark as 'is_luxury' if price > 100."
+        )
+        
+        # Use safe wrapper with schema
+        response = generate_response_safe(
+            PROMPT, 
+            model="gemini-2.5-flash",
+            response_schema=report_schema,
+            response_mime_type="application/json"
+        )
+        
+        # Parse the JSON string from the response
+        import json
+        return jsonify(json.loads(response.text))
+        
+    except Exception as e:
+        return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
 
 @app.route('/inventory-chat', methods=['GET'])
 def inventory_chat():
@@ -116,15 +187,62 @@ def inventory_chat():
 
     inventory_text = get_all_inventory_text()
     
+    # 2. System/Context Prompt
+    system_instruction = (
+        f"You are a store manager. You can update prices and delete products. "
+        f"Inventory: [{inventory_text}]. "
+        f"User Question: {question}"
+    )
+
     try:
-        PROMPT = (
-            f"You are a store manager. Based on this inventory list: [{inventory_text}], "
-            f"answer the user's question: [{question}]."
-        )
-        answer = call_gemini_with_fallback(PROMPT)
-        return jsonify({"answer": answer})
+        # Manual Loop Implementation using Safe Generator
+        messages = [system_instruction]
+        turn_count = 0
+        
+        while turn_count < 5:
+            turn_count += 1
+            # Generate content with robust 429 handling
+            res = generate_response_safe(
+                prompt=messages,
+                model="gemini-2.5-flash",
+                tools_list=[tools.update_product_price, tools.delete_product]
+            )
+            
+            # Check for function calls
+            if res.function_calls:
+                # Add the model's request to history
+                messages.append(res.candidates[0].content)
+                
+                parts = []
+                for fc in res.function_calls:
+                     fn_name = fc.name
+                     fn_args = fc.args
+                     print(f"Calling tool: {fn_name} with {fn_args}")
+                     
+                     if fn_name in available_tools:
+                         result = available_tools[fn_name](**fn_args)
+                         # Create FunctionResponse part
+                         parts.append(types.Part.from_function_response(
+                             name=fn_name,
+                             response=result
+                         ))
+                
+                # Add function response to history
+                messages.append(types.Content(role="user", parts=parts))
+                # Loop continues to send this back to model
+            else:
+                # No function call, just text response
+                return jsonify({"answer": res.text.strip()})
+        
+        return jsonify({"answer": "I'm thinking too hard about this! Please try a simpler request."})
+
     except Exception as e:
+        print(f"Error: {e}")
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+@app.route('/')
+def home():
+    return render_template('index.html')
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
