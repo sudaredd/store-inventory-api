@@ -29,5 +29,7 @@ def test_chat(question):
         print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
-    test_chat("What is the most expensive item?")
-    test_chat("Do you have any pixel devices?")
+    # Test the delete confirmation flow
+    test_chat("Please delete product with id 1")
+    test_chat("YES")
+    test_chat("What is product with id 1?")

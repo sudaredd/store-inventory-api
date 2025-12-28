@@ -251,7 +251,7 @@
                 removeMessage(loadingId);
 
                 if (data.answer) {
-                    addMessage('ai', data.answer);
+                    addMessage('ai', data.answer, data);
                     // Auto-refresh products to show any updates/deletions
                     fetchProducts();
                 } else if (data.error) {
@@ -266,7 +266,7 @@
             }
         });
 
-        function addMessage(type, text) {
+        function addMessage(type, text, metadata = null) {
             const div = document.createElement('div');
             div.className = `flex items-start gap-3 ${type === 'user' ? 'flex-row-reverse' : ''}`;
 
@@ -281,10 +281,38 @@
                 ? 'bg-gray-800 text-white rounded-tr-none shadow-md'
                 : (type === 'error' ? 'bg-red-50 text-red-800 border border-red-100' : 'bg-white border border-gray-200 rounded-tl-none shadow-sm text-gray-700');
 
+            // --- Metadata Badge Logic ---
+            let badgeHtml = '';
+            if (metadata && type !== 'user') {
+                const model = metadata.model || 'Unknown';
+                const latency = metadata.latency || 0;
+                const category = metadata.category || 'UNKNOWN';
+
+                // Color coding
+                let badgeColor = 'bg-blue-50 text-blue-600 border-blue-100'; // Default/Simple
+                if (category.includes('COMPLEX')) badgeColor = 'bg-purple-50 text-purple-600 border-purple-100';
+                if (category.includes('DELETE')) badgeColor = 'bg-red-50 text-red-600 border-red-100';
+                if (category === 'System-Interceptor') badgeColor = 'bg-emerald-50 text-emerald-600 border-emerald-100';
+
+                badgeHtml = `
+                    <div class="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between text-[10px] font-medium ${badgeColor.split(' ')[1]}">
+                        <span class="flex items-center gap-1 opacity-80">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            ${model} (${category})
+                        </span>
+                        <span class="flex items-center gap-1 opacity-70">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            ${latency}s
+                        </span>
+                    </div>
+                `;
+            }
+
             div.innerHTML = `
                 <div class="w-8 h-8 rounded-full ${avatarClass} flex items-center justify-center text-xs font-bold shrink-0 shadow-sm">${avatarLabel}</div>
                 <div class="${bubbleClass} p-3 rounded-2xl text-sm max-w-[85%] leading-relaxed animation-fade-in shadow-sm">
-                    ${text}
+                    <div>${text}</div>
+                    ${badgeHtml}
                 </div>
             `;
 
