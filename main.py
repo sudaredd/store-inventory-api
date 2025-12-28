@@ -6,6 +6,8 @@ import os
 import time
 from dotenv import load_dotenv
 import tools 
+import uuid
+import json 
 
 load_dotenv()
 
@@ -180,6 +182,14 @@ def inventory_chat():
     if not question:
         return jsonify({"error": "Missing query parameter 'q'"}), 400
 
+    # --- Day 11: Chat Persistence ---
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+    session_id = session['session_id']
+    
+    # Save User Context
+    tools.save_chat_message(session_id, 'user', question)
+
     # --- Day 9: Human-in-the-Loop ---
     if 'pending_delete' in session:
         end_time = time.time()
@@ -209,6 +219,7 @@ def inventory_chat():
     # 2. System/Context Prompt
     system_instruction = (
         f"You are a Senior Store Manager. You have access to a database of products and you can use tools to manage it. "
+        f"You ALSO have a memory of the conversation. You should remember user details (name, preferences) if they were mentioned previously. "
         f"For every request, you MUST think step-by-step using this exact structure:\n\n"
         f"1. Analysis: Restate what the user wants in your own words. If calculation is needed, show math here.\n"
         f"2. Inventory Check: Search the provided inventory text for relevant products and IDs.\n"
@@ -311,6 +322,13 @@ def inventory_chat():
 
         # Manual Loop Implementation using Safe Generator
         messages = [system_instruction]
+        
+        # Load History
+        history = tools.get_recent_history(session_id)
+        
+        for msg in history:
+            messages.append(types.Content(role=msg['role'], parts=[types.Part.from_text(text=msg['parts'][0])]))
+            
         turn_count = 0
         
         while turn_count < 5:
@@ -358,6 +376,10 @@ def inventory_chat():
                 end_time = time.time()
                 latency = round(end_time - start_time, 2)
                 answer_text = res.text.strip() if res.text else "I completed the action."
+                
+                # Save AI Context
+                tools.save_chat_message(session_id, 'model', answer_text)
+                
                 return jsonify({
                     "answer": answer_text,
                     "model": selected_model,

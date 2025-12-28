@@ -23,3 +23,35 @@ def delete_product(product_id: int):
         return {"status": "error", "message": str(e)}
     finally:
         conn.close()
+
+def save_chat_message(session_id: str, role: str, content: str):
+    """Saves a chat message to the history."""
+    conn = get_db_connection()
+    try:
+        conn.execute('INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)', 
+                     (session_id, role, content))
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving chat message: {e}")
+    finally:
+        conn.close()
+
+def get_recent_history(session_id: str, limit: int = 10):
+    """Retrieves the most recent chat history for a session."""
+    conn = get_db_connection()
+    try:
+        messages = conn.execute('''
+            SELECT role, content 
+            FROM chat_history 
+            WHERE session_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        ''', (session_id, limit)).fetchall()
+        
+        # Reverse to return in chronological order (oldest -> newest)
+        return [{"role": m["role"], "parts": [m["content"]]} for m in reversed(messages)]
+    except Exception as e:
+        print(f"Error retrieving chat history: {e}")
+        return []
+    finally:
+        conn.close()
