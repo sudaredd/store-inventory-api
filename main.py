@@ -21,7 +21,8 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 # Create a tool dictionary for easy lookup
 available_tools = {
     'update_product_price': tools.update_product_price,
-    'delete_product': tools.delete_product
+    'delete_product': tools.delete_product,
+    'search_inventory': tools.search_inventory
 }
 
 def generate_response_safe(prompt, model="gemini-2.5-flash", tools_list=None, response_schema=None, response_mime_type=None):
@@ -214,7 +215,7 @@ def inventory_chat():
                  "category": "DELETE-CANCELLED"
              })
 
-    inventory_text = get_all_inventory_text()
+    # inventory_text = get_all_inventory_text() # REMOVED for RAG
     
     # 2. System/Context Prompt
     system_instruction = (
@@ -222,22 +223,22 @@ def inventory_chat():
         f"You ALSO have a memory of the conversation. You should remember user details (name, preferences) if they were mentioned previously. "
         f"For every request, you MUST think step-by-step using this exact structure:\n\n"
         f"1. Analysis: Restate what the user wants in your own words. If calculation is needed, show math here.\n"
-        f"2. Inventory Check: Search the provided inventory text for relevant products and IDs.\n"
-        f"3. Action Plan: Decide if you need to call a tool or just provide info. Explain your logic. If you need to call a tool, you must call it.\n"
+        f"2. Search: Use the `search_inventory` tool to find relevant products. DO NOT assume you know what is in stock.\n"
+        f"3. Action Plan: Decide if you need to call other tools (update/delete) or just provide info. Explain your logic. If you need to call a tool, you must call it.\n"
         f"4. Final Answer: Provide the conclusion to the user.\n\n"
         f"CRITICAL RULES:\n"
         f"- You CANNOT update, delete, or modify the database with words alone.\n"
         f"- If your Action Plan says to delete or update, you MUST emit a tool call. Do not just say you did it.\n"
-        f"- Never assume an action is complete until the tool has returned a result.\n\n"
+        f"- Never assume an action is complete until the tool has returned a result.\n"
+        f"- WHEN MENTIONING PRODUCTS: You MUST include the Product ID in parentheses, e.g., 'MacBook Pro (ID: 123)'.\n\n"
         f"EXAMPLE OF CORRECT BEHAVIOR:\n"
         f"User: 'Delete Product 1'\n"
         f"You:\n"
         f"1. Analysis: User wants to delete Product 1.\n"
-        f"2. Inventory Check: Product 1 is 'Widget'.\n"
-        f"3. Action Plan: I must call the tool.\n"
+        f"2. Search: I need to confirm Product 1 exists. Call search_inventory('Product 1')\n"
+        f"3. Action Plan: I must call the delete tool.\n"
         f"4. Final Answer: I am calling the tool now.\n"
         f"(Tools: function_call('delete_product', {{'product_id': 1}}))\n\n"
-        f"Inventory: [{inventory_text}].\n"
         f"User Question: {question}"
     )
 
@@ -337,7 +338,7 @@ def inventory_chat():
             res = generate_response_safe(
                 prompt=messages,
                 model=selected_model,
-                tools_list=[tools.update_product_price, tools.delete_product]
+                tools_list=[tools.update_product_price, tools.delete_product, tools.search_inventory]
             )
             
             # DEBUG: Print raw response to trace tool behavior
@@ -379,12 +380,39 @@ def inventory_chat():
                 
                 # Save AI Context
                 tools.save_chat_message(session_id, 'model', answer_text)
-                
+
+                # Collect product data to send to frontend
+                found_products = []
+                # Check history for recent tool responses containing product data
+                for content in messages:
+                    if not hasattr(content, 'role'): continue
+                    if content.role == "user": # Tool responses are user role
+                        for part in content.parts:
+                            if part.function_response and part.function_response.name == "search_inventory":
+                                # Extract the payload 
+                                # Note: Actual API output format check
+                                try:
+                                    response_data = part.function_response.response
+                                    # It might be a dict with 'result' or just the raw list depending on SDK
+                                    # Based on tools.py it returns a list of dicts.
+                                    # Let's assume response_data is directly usable or nested.
+                                    # In the Google GenAI SDK, the response is usually wrapped.
+                                    # For simplicity, we trust the SDK unpacks it or we treat it carefully.
+                                    # Since we passed a native python list-of-dicts, it should be in response_data['result'] or similar.
+                                    # Printing debugging helps, but let's try to just append it if it's a list.
+                                    if isinstance(response_data, list):
+                                         found_products.extend(response_data)
+                                    elif isinstance(response_data, dict) and 'result' in response_data:
+                                         found_products.extend(response_data['result'])
+                                except:
+                                    pass
+
                 return jsonify({
                     "answer": answer_text,
                     "model": selected_model,
                     "latency": latency,
-                    "category": category
+                    "category": category,
+                    "products": found_products[:10] # Limit to top 10
                 })
         
         end_time = time.time()
