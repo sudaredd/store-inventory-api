@@ -70,6 +70,27 @@ def delete_products_range(min_id: int = None, max_id: int = None):
     finally:
         conn.close()
 
+def delete_products_by_name(pattern: str):
+    """
+    Deletes products where the name matches a pattern (SQL LIKE).
+    Useful for deleting 'Samsung' or 'Laptop' etc.
+    """
+    conn = get_db_connection()
+    try:
+        # First count how many
+        count = conn.execute('SELECT count(*) FROM products WHERE name LIKE ?', ('%' + pattern + '%',)).fetchone()[0]
+        
+        if count == 0:
+             return {"status": "error", "message": f"No products found matching '{pattern}'"}
+             
+        conn.execute('DELETE FROM products WHERE name LIKE ?', ('%' + pattern + '%',))
+        conn.commit()
+        return {"status": "success", "message": f"Deleted {count} products matches '{pattern}'"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()
+
 def save_chat_message(session_id: str, role: str, content: str):
     """Saves a chat message to the history."""
     conn = get_db_connection()

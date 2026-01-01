@@ -23,7 +23,8 @@ available_tools = {
     'update_product_price': tools.update_product_price,
     'delete_product': tools.delete_product,
     'search_inventory': tools.search_inventory,
-    'delete_products_range': tools.delete_products_range
+    'delete_products_range': tools.delete_products_range,
+    'delete_products_by_name': tools.delete_products_by_name
 }
 
 def generate_response_safe(prompt, model="gemini-2.5-flash", tools_list=None, response_schema=None, response_mime_type=None):
@@ -206,7 +207,11 @@ def inventory_chat():
             else:
                 # Bulk Delete Execution
                 params = session['pending_bulk_delete']
-                result = tools.delete_products_range(min_id=params.get('min_id'), max_id=params.get('max_id'))
+                if params.get('name_pattern'):
+                    result = tools.delete_products_by_name(pattern=params['name_pattern'])
+                else:
+                    result = tools.delete_products_range(min_id=params.get('min_id'), max_id=params.get('max_id'))
+                
                 session.pop('pending_bulk_delete', None)
                 msg = f"Confirmed. {result['message']}"
 
@@ -329,18 +334,21 @@ def inventory_chat():
                  })
 
         elif category == "DELETE_BULK":
-             # 1. Extract params
+             # 1. Extract intent (Range OR Name)
             extraction_prompt = (
-                f"Extract the ID range logic from: '{question}'. "
-                f"Return JSON with 'min_id' and 'max_id' (integers or null). "
-                f"Example: 'delete id > 10' -> {{'min_id': 11, 'max_id': null}}"
+                f"Extract the bulk delete logic from: '{question}'. "
+                f"If it's an ID range, return 'min_id'/'max_id'. "
+                f"If it's a name pattern (e.g., 'Delete all Samsung products'), return only the BRAND/KEYWORD (e.g., 'Samsung'). "
+                f"IGNORE words like 'products', 'items', 'inventory'. "
+                f"Return JSON."
             )
             # Use JSON schema for reliability
             schema = {
                 "type": "OBJECT",
                 "properties": {
                     "min_id": {"type": "INTEGER", "nullable": True},
-                    "max_id": {"type": "INTEGER", "nullable": True}
+                    "max_id": {"type": "INTEGER", "nullable": True},
+                    "name_pattern": {"type": "STRING", "nullable": True}
                 }
             }
             res_json = generate_response_safe(extraction_prompt, model="gemini-2.5-flash", 
@@ -356,12 +364,21 @@ def inventory_chat():
             session['pending_bulk_delete'] = params
             
             desc = ""
-            if params.get('min_id') and params.get('max_id'):
+            if params.get('name_pattern'):
+                desc = f"all products containing '{params['name_pattern']}'"
+            elif params.get('min_id') and params.get('max_id'):
                 desc = f"IDs between {params['min_id']} and {params['max_id']}"
             elif params.get('min_id'):
                 desc = f"IDs greater than or equal to {params['min_id']}"
             elif params.get('max_id'):
                 desc = f"IDs less than or equal to {params['max_id']}"
+            else:
+                 return jsonify({
+                    "answer": "I couldn't understand what range or items you want to delete. Please be more specific (e.g. 'Delete ID > 10' or 'Delete all Samsung').",
+                    "model": "System-Interceptor",
+                    "latency": latency,
+                    "category": "DELETE-FAILED"
+                })
             
             return jsonify({
                 "answer": f"⚠️ BULK DELETE WARNING: You are about to delete {desc}. This cannot be undone. Are you sure? (Reply YES)",
@@ -394,7 +411,7 @@ def inventory_chat():
             res = generate_response_safe(
                 prompt=messages,
                 model=selected_model,
-                tools_list=[tools.update_product_price, tools.delete_product, tools.search_inventory, tools.delete_products_range]
+                tools_list=[tools.update_product_price, tools.delete_product, tools.search_inventory, tools.delete_products_range, tools.delete_products_by_name]
             )
             
             # DEBUG: Print raw response to trace tool behavior
