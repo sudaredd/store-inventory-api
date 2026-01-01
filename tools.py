@@ -44,6 +44,32 @@ def delete_product(product_id: int):
     finally:
         conn.close()
 
+def delete_products_range(min_id: int = None, max_id: int = None):
+    """
+    Deletes products within a specified ID range. 
+    Useful for bulk cleanup.
+    """
+    conn = get_db_connection()
+    try:
+        if min_id is not None and max_id is not None:
+            conn.execute('DELETE FROM products WHERE id >= ? AND id <= ?', (min_id, max_id))
+            msg = f"Deleted products between ID {min_id} and {max_id}"
+        elif min_id is not None:
+            conn.execute('DELETE FROM products WHERE id >= ?', (min_id,))
+            msg = f"Deleted products with ID >= {min_id}"
+        elif max_id is not None:
+             conn.execute('DELETE FROM products WHERE id <= ?', (max_id,))
+             msg = f"Deleted products with ID <= {max_id}"
+        else:
+            return {"status": "error", "message": "Must specify min_id or max_id"}
+            
+        conn.commit()
+        return {"status": "success", "message": msg}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()
+
 def save_chat_message(session_id: str, role: str, content: str):
     """Saves a chat message to the history."""
     conn = get_db_connection()

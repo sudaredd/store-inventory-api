@@ -22,7 +22,8 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 available_tools = {
     'update_product_price': tools.update_product_price,
     'delete_product': tools.delete_product,
-    'search_inventory': tools.search_inventory
+    'search_inventory': tools.search_inventory,
+    'delete_products_range': tools.delete_products_range
 }
 
 def generate_response_safe(prompt, model="gemini-2.5-flash", tools_list=None, response_schema=None, response_mime_type=None):
@@ -191,23 +192,33 @@ def inventory_chat():
     # Save User Context
     tools.save_chat_message(session_id, 'user', question)
 
-    # --- Day 9: Human-in-the-Loop ---
-    if 'pending_delete' in session:
+    # --- Day 9: Human-in-the-Loop (Updated for Bulk) ---
+    if 'pending_delete' in session or 'pending_bulk_delete' in session:
         end_time = time.time()
         latency = round(end_time - start_time, 2)
-        # Check if user approved (flexible match)
+        
         if 'YES' in question.upper():
-            product_id = session['pending_delete']['product_id']
-            result = tools.delete_product(product_id=product_id)
-            session.pop('pending_delete', None)
+            if 'pending_delete' in session:
+                product_id = session['pending_delete']['product_id']
+                result = tools.delete_product(product_id=product_id)
+                session.pop('pending_delete', None)
+                msg = f"Okay, I have deleted the item. {result['message']}"
+            else:
+                # Bulk Delete Execution
+                params = session['pending_bulk_delete']
+                result = tools.delete_products_range(min_id=params.get('min_id'), max_id=params.get('max_id'))
+                session.pop('pending_bulk_delete', None)
+                msg = f"Confirmed. {result['message']}"
+
             return jsonify({
-                "answer": f"Okay, I have deleted the item. {result['message']}",
+                "answer": msg,
                 "model": "System-Interceptor",
                 "latency": latency,
                 "category": "DELETE-CONFIRMED"
             })
         else:
              session.pop('pending_delete', None)
+             session.pop('pending_bulk_delete', None)
              return jsonify({
                  "answer": "Okay, I have cancelled the deletion.",
                  "model": "System-Interceptor",
@@ -245,10 +256,14 @@ def inventory_chat():
     try:
         # --- Day 8: Multi-Model Router ---
         def classify_query(q):
-            """Classifies query as SIMPLE, COMPLEX, or DELETE."""
-            # PRE-FILTER: Explicitly catch delete intent to force strict tool usage
-            if "delete" in q.lower() or "remove" in q.lower():
-                return "DELETE"
+            """Classifies query as SIMPLE, COMPLEX, DELETE_SINGLE, or DELETE_BULK."""
+            q_lower = q.lower()
+            
+            # 1. Check for BULK delete
+            if "delete" in q_lower or "remove" in q_lower:
+                if any(x in q_lower for x in ['all', 'bulk', 'range', 'greater', 'less', '>', '<']):
+                    return "DELETE_BULK"
+                return "DELETE_SINGLE"
 
             try:
                 router_prompt = (
@@ -259,16 +274,15 @@ def inventory_chat():
                     f"- COMPLEX: Math, multi-item reasoning, strategy, discounts, 'what if' scenarios.\n"
                     f"Return ONLY the word SIMPLE or COMPLEX."
                 )
-                # Use the ONLY available model
                 res = generate_response_safe(router_prompt, model="gemini-2.5-flash")
                 return (res.text or "").strip().upper()
             except Exception:
-                return "COMPLEX" # Fallback to smart model on error
+                return "COMPLEX"
 
         category = classify_query(question)
         
-        if category == "DELETE":
-            # DETERMINISTIC FLOW: Do not trust the chat model to pause.
+        if category == "DELETE_SINGLE":
+            # EXISTING SAFETY INTERCEPTOR
             # 1. Extract intent
             extraction_prompt = (
                 f"Extract the specific Product Name or details the user wants to remove from: '{question}'. "
@@ -314,6 +328,48 @@ def inventory_chat():
                      "category": "DELETE-FAILED"
                  })
 
+        elif category == "DELETE_BULK":
+             # 1. Extract params
+            extraction_prompt = (
+                f"Extract the ID range logic from: '{question}'. "
+                f"Return JSON with 'min_id' and 'max_id' (integers or null). "
+                f"Example: 'delete id > 10' -> {{'min_id': 11, 'max_id': null}}"
+            )
+            # Use JSON schema for reliability
+            schema = {
+                "type": "OBJECT",
+                "properties": {
+                    "min_id": {"type": "INTEGER", "nullable": True},
+                    "max_id": {"type": "INTEGER", "nullable": True}
+                }
+            }
+            res_json = generate_response_safe(extraction_prompt, model="gemini-2.5-flash", 
+                                            response_schema=schema, response_mime_type="application/json")
+            
+            import json
+            params = json.loads(res_json.text)
+            
+            end_time = time.time()
+            latency = round(end_time - start_time, 2)
+            
+            # Store pending action
+            session['pending_bulk_delete'] = params
+            
+            desc = ""
+            if params.get('min_id') and params.get('max_id'):
+                desc = f"IDs between {params['min_id']} and {params['max_id']}"
+            elif params.get('min_id'):
+                desc = f"IDs greater than or equal to {params['min_id']}"
+            elif params.get('max_id'):
+                desc = f"IDs less than or equal to {params['max_id']}"
+            
+            return jsonify({
+                "answer": f"⚠️ BULK DELETE WARNING: You are about to delete {desc}. This cannot be undone. Are you sure? (Reply YES)",
+                "model": "System-Interceptor",
+                "latency": latency,
+                "category": "DELETE-SAFETY"
+            })
+
         elif "SIMPLE" in category:
             selected_model = "gemini-2.5-flash"
         else:
@@ -338,7 +394,7 @@ def inventory_chat():
             res = generate_response_safe(
                 prompt=messages,
                 model=selected_model,
-                tools_list=[tools.update_product_price, tools.delete_product, tools.search_inventory]
+                tools_list=[tools.update_product_price, tools.delete_product, tools.search_inventory, tools.delete_products_range]
             )
             
             # DEBUG: Print raw response to trace tool behavior
